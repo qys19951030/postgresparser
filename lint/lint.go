@@ -103,7 +103,7 @@ func CheckAll(sql string) (*BatchReport, error) {
 	reports := make([]*Report, len(batch.Statements))
 	out := &BatchReport{Reports: reports}
 	for i, stmt := range batch.Statements {
-		if stmt.Query == nil {
+		if stmt.Query == nil || len(stmt.Warnings) > 0 {
 			return nil, statementParseError(stmt)
 		}
 		report := buildReport(stmt.Query, i+1)
