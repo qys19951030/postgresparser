@@ -30,6 +30,11 @@ type collector struct {
 	// issue is reported once even when the same query node is reachable through
 	// several IR links (subquery list, CTE list, set-operation tables).
 	seen map[string]struct{}
+	// maxDepth tracks the deepest subquery nesting reached; depthWarned
+	// guarantees the depth reminder is emitted at most once per statement.
+	maxDepth    int
+	deepest     *postgresparser.ParsedQuery
+	depthWarned bool
 }
 
 // buildReport runs every applicable rule against one parsed statement and
@@ -41,10 +46,16 @@ func buildReport(query *postgresparser.ParsedQuery, statementIndex int) *Report 
 		seen:           make(map[string]struct{}),
 	}
 	c.walk(query, 0)
+	c.checkSubqueryDepth(query)
 	return finalize(c.resolveOffsets(), statementIndex)
 }
 
-// walk applies the statement-scoped rules to one query node and then recurses// into every nested query it owns. depth counts subquery nesting edges only.
+// maxSubqueryDepth is the number of nested subquery levels that triggers the
+// depth reminder: nesting deeper than three subqueries.
+const maxSubqueryDepth = 3
+
+// walk applies the statement-scoped rules to one query node and then recurses
+// into every nested query it owns. depth counts subquery nesting edges only.
 func (c *collector) walk(query *postgresparser.ParsedQuery, depth int) {
 	if query == nil {
 		return
@@ -58,13 +69,31 @@ func (c *collector) walk(query *postgresparser.ParsedQuery, depth int) {
 	}
 
 	for i := range query.Subqueries {
-		c.walk(query.Subqueries[i].Query, depth+1)
+		nested := query.Subqueries[i].Query
+		if nested != nil && depth+1 > c.maxDepth {
+			c.maxDepth = depth + 1
+			c.deepest = nested
+		}
+		c.walk(nested, depth+1)
 	}
 	for i := range query.CTEs {
 		// CTE bodies are reviewed as their own query scopes but do not add a
 		// subquery-nesting level.
 		c.walk(query.CTEs[i].ParsedQuery, depth)
 	}
+}
+
+// checkSubqueryDepth emits one info reminder when the deepest subquery chain
+// nests more than three levels. It is evaluated once per statement, so the
+// same depth problem can never be reported at every nested layer.
+func (c *collector) checkSubqueryDepth(root *postgresparser.ParsedQuery) {
+	if c.depthWarned || c.maxDepth <= maxSubqueryDepth || c.deepest == nil {
+		return
+	}
+	c.depthWarned = true
+	fragment, relStart := locate(root.RawSQL, c.deepest.RawSQL)
+	c.add(c.deepest, RuleSubqueryDepth, SeverityInfo,
+		"子查询嵌套超过三层，注意嵌套深度", fragment, relStart)
 }
 
 // hasLimit reports whether a query node bounds its result size. The parser
