@@ -8,13 +8,6 @@ import (
 	"github.com/valkdb/postgresparser"
 )
 
-// buildReport runs every applicable rule against one parsed statement and
-// assembles a sorted, self-consistent report. It never mutates query.
-func buildReport(query *postgresparser.ParsedQuery, statementIndex int) *Report {
-	findings := make([]Finding, 0)
-	return finalize(findings, statementIndex)
-}
-
 // finalize sorts findings deterministically and derives the severity counts
 // so the totals can never drift away from the listed findings.
 func finalize(findings []Finding, statementIndex int) *Report {
