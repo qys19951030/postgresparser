@@ -53,6 +53,8 @@ func (c *collector) walk(query *postgresparser.ParsedQuery, depth int) {
 	if query.Command == postgresparser.QueryCommandSelect {
 		c.checkResultBounds(query)
 		c.checkStarProjection(query)
+		c.checkCartesianJoin(query)
+		c.checkOrderWithoutLimit(query)
 	}
 
 	for i := range query.Subqueries {
@@ -99,6 +101,54 @@ func (c *collector) checkStarProjection(query *postgresparser.ParsedQuery) {
 		c.add(query, RuleStarProjection, SeverityMedium,
 			"查询语句使用星号选择列，字段没有收敛", fragment, relStart)
 	}
+}
+
+// checkCartesianJoin flags every explicit join that carries neither an
+// ON/USING condition nor an implicit NATURAL condition. Comma-separated FROM
+// items are not joins in the IR and are intentionally left alone.
+func (c *collector) checkCartesianJoin(query *postgresparser.ParsedQuery) {
+	for _, table := range query.Tables {
+		if table.JoinType == "" || table.Nested {
+			continue
+		}
+		if strings.HasPrefix(table.JoinType, "NATURAL") || strings.TrimSpace(table.JoinCondition) != "" {
+			continue
+		}
+		fragment, relStart := locate(query.RawSQL, joinFragment(table))
+		c.add(query, RuleCartesianJoin, SeverityHigh,
+			"join 缺少连接条件，存在笛卡尔积风险", fragment, relStart)
+	}
+}
+
+// joinFragment picks the most specific available raw text for an
+// unconditional join: the relation's own text when present, else the join
+// type keyword (e.g. CROSS JOIN).
+func joinFragment(table postgresparser.TableRef) string {
+	if raw := strings.TrimSpace(table.Raw); raw != "" {
+		return raw
+	}
+	return table.JoinType
+}
+
+// checkOrderWithoutLimit flags ORDER BY blocks that are not bounded by a
+// LIMIT clause, since the database must sort the full result set.
+func (c *collector) checkOrderWithoutLimit(query *postgresparser.ParsedQuery) {
+	if len(query.OrderBy) == 0 || hasLimit(query) {
+		return
+	}
+	fragment, relStart := locate(query.RawSQL, orderFragment(query))
+	c.add(query, RuleOrderWithoutLimit, SeverityInfo,
+		"order by 后面没有 limit，注意排序开销", fragment, relStart)
+}
+
+// orderFragment renders the leading ORDER BY item text from the IR. The full
+// ORDER BY clause is not stored verbatim, so the first sort expression is
+// used as the anchor fragment.
+func orderFragment(query *postgresparser.ParsedQuery) string {
+	if len(query.OrderBy) == 0 {
+		return query.RawSQL
+	}
+	return strings.TrimSpace(query.OrderBy[0].Expression)
 }
 
 // add records a finding unless the same rule has already been reported at the
